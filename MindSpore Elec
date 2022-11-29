@@ -1,0 +1,101 @@
+from mindelec.data import Dataset
+from mindelec.geometry import Disk, Rectangle, TimeDomain, GeometryWithTime
+# 激励源区域
+disk = Disk("src", disk_origin, disk_radius)
+# 非激励源区域
+rectangle = Rectangle("rect", coord_min, coord_max)
+diff = rectangle – disk
+# 时间范围
+time_interval = TimeDomain("time", 0.0, config["range_t"])
+...
+# 最终采样区域
+geom_dict = {src_region : ["domain", "IC"],
+                 no_src_region : ["domain", "IC"],
+                 boundary : ["BC"]}
+                 
+# create dataset for train
+elec_train_dataset = Dataset(geom_dict)
+train_dataset = elec_train_dataset.create_dataset(batch_size=config["train_batch_size"],
+                                                  shuffle=True,
+                                                  prebatched_data=True,
+                                                  drop_remainder=True)
+ # 2D TE波（2阶Mur边界条件） 
+class Maxwell2DMur(Problem):
+    def __init__(self, model, config, domain_name=None, bc_name=None, ic_name=None):
+        super(Maxwell2DMur, self).__init__()
+ 
+　　@ms_function
+    def governing_equation(self, *output, **kwargs):
+        """TE电磁波"""
+　    　u = output[0]
+        # 输入数据
+        data = kwargs[self.domain_name]
+        x = self.reshape(data[:, 0], (-1, 1))
+        y = self.reshape(data[:, 1], (-1, 1))
+        t = self.reshape(data[:, 2], (-1, 1))
+ 
+        # 梯度计算
+        dex_dxyt = self.grad(data, None, 0, u)
+　　　   ...
+ 
+        # 控制方程的损失函数
+        loss_a1 = (self.s_hz * dhz_dy) / (self.s_ex * self.s_t * self.eps_x)
+        loss_a2 = dex_dt / self.s_t
+        pde_r1 = loss_a1 - loss_a2
+        ...
+　　　　
+　　@ms_function
+    def boundary_condition(self, *output, **kwargs):
+        """2阶Mur边界条件"""
+        # network input and output
+        u = output[0]
+        data = kwargs[self.bc_name]
+        ...
+ 
+        # 左边界条件
+        bc_r1 = dhz_dx / self.s_x - dhz_dt / (self.light_speed * self.s_x) + \
+                self.s_ex * self.light_speed * self.eps_x / (2 * self.s_hz * self.s_x) * dex_dy 
+        ...
+　　　　
+　　@ms_function
+    def initial_condition(self, *output, **kwargs):
+        """初始条件: u = 0"""
+        u = output[0]
+        return u
+   # 定义方程约束
+train_prob = {}
+for dataset in elec_train_dataset.all_datasets:
+    train_prob[dataset.name] = Maxwell2DMur(model=model, config=config,
+                                            domain_name=dataset.name + "_points",
+                                            ic_name=dataset.name + "_points",
+                                            bc_name=dataset.name + "_points")
+train_constraints = Constraints(elec_train_dataset, train_prob)
+
+model = MultiScaleFCCell(config["input_size"],
+                         config["output_size"],
+                         layers=config["layers"],
+                         neurons=config["neurons"],
+                         input_scale=config["input_scale"],
+                         residual=config["residual"],
+                         weight_init=HeUniform(negative_slope=math.sqrt(5)),
+                         act="sin",
+                         num_scales=config["num_scales"],
+                         amp_factor=config["amp_factor"],
+                         scale_factor=config["scale_factor"])
+                         # 优化器
+lr_scheduler = MultiStepLR(config["lr"], config["milestones"], config["lr_gamma"], steps_per_epoch, config["train_epoch"])
+lr = lr_scheduler.get_lr()
+optim = nn.Adam(params, learning_rate=Tensor(lr))
+ 
+# 求解器
+solver = Solver(model,
+                optimizer=optim,
+                mode="PINNs",
+                train_constraints=train_constraints,
+                test_constraints=None,
+                metrics={'l2': L2(), 'distance': nn.MAE()},
+                loss_fn='smooth_l1_loss',
+                loss_scale_manager=DynamicLossScaleManager(init_loss_scale=2 ** 10, scale_window=2000),
+                mtl_weighted_cell=mtl)
+#训练
+solver.train(config["train_epoch"],train_dataset, callbacks=callbacks, dataset_sink_mode=True)
